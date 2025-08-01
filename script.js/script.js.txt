@@ -1,0 +1,304 @@
+class BarcodeScanner {
+    constructor() {
+        this.video = document.getElementById('video');
+        this.canvas = document.getElementById('canvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.stream = null;
+        this.scannedCodes = [];
+        this.isScanning = false;
+        this.vibrationEnabled = 'vibrate' in navigator;
+        
+        this.initializeElements();
+        this.bindEvents();
+        this.updateStatus('カメラを開始してください');
+    }
+    
+    initializeElements() {
+        this.startBtn = document.getElementById('startCamera');
+        this.stopBtn = document.getElementById('stopCamera');
+        this.captureBtn = document.getElementById('capture');
+        this.downloadBtn = document.getElementById('downloadCSV');
+        this.manualInput = document.getElementById('manualCode');
+        this.addManualBtn = document.getElementById('addManual');
+        this.scannedCodesDiv = document.getElementById('scannedCodes');
+        this.codeCountSpan = document.getElementById('codeCount');
+        this.statusDiv = document.getElementById('status');
+    }
+    
+    bindEvents() {
+        this.startBtn.addEventListener('click', () => this.startCamera());
+        this.stopBtn.addEventListener('click', () => this.stopCamera());
+        this.captureBtn.addEventListener('click', () => this.captureAndScan());
+        this.downloadBtn.addEventListener('click', () => this.downloadCSV());
+        this.addManualBtn.addEventListener('click', () => this.addManualCode());
+        this.manualInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this.addManualCode();
+        });
+        
+        // タッチイベントの最適化
+        this.startBtn.addEventListener('touchstart', (e) => e.preventDefault());
+        this.stopBtn.addEventListener('touchstart', (e) => e.preventDefault());
+        this.captureBtn.addEventListener('touchstart', (e) => e.preventDefault());
+        this.downloadBtn.addEventListener('touchstart', (e) => e.preventDefault());
+        this.addManualBtn.addEventListener('touchstart', (e) => e.preventDefault());
+    }
+    
+    updateStatus(message) {
+        if (this.statusDiv) {
+            this.statusDiv.textContent = message;
+        }
+    }
+    
+    async startCamera() {
+        try {
+            this.updateStatus('カメラを起動中...');
+            
+            this.stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: 'environment', // 背面カメラを優先
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            });
+            
+            this.video.srcObject = this.stream;
+            await this.video.play();
+            
+            this.startBtn.disabled = true;
+            this.stopBtn.disabled = false;
+            this.captureBtn.disabled = false;
+            
+            this.updateStatus('バーコードを枠内に合わせてください');
+            
+            // カメラが起動したら自動スキャン開始
+            this.startAutoScan();
+            
+        } catch (error) {
+            console.error('カメラの起動に失敗しました:', error);
+            this.updateStatus('カメラアクセスが拒否されました');
+            
+            if (error.name === 'NotAllowedError') {
+                alert('カメラへのアクセスが許可されていません。\nブラウザの設定でカメラ権限を許可してください。');
+            } else if (error.name === 'NotFoundError') {
+                alert('カメラが見つかりません。\nデバイスにカメラが接続されているか確認してください。');
+            } else {
+                alert('カメラの起動に失敗しました。\nエラー: ' + error.message);
+            }
+        }
+    }
+    
+    stopCamera() {
+        if (this.stream) {
+            this.stream.getTracks().forEach(track => track.stop());
+            this.stream = null;
+        }
+        
+        this.video.srcObject = null;
+        this.isScanning = false;
+        
+        this.startBtn.disabled = false;
+        this.stopBtn.disabled = true;
+        this.captureBtn.disabled = true;
+        
+        this.updateStatus('カメラを開始してください');
+    }
+    
+    async startAutoScan() {
+        this.isScanning = true;
+        await this.scanLoop();
+    }
+    
+    async scanLoop() {
+        while (this.isScanning && this.stream) {
+            try {
+                const code = await this.scanBarcode();
+                if (code) {
+                    this.addScannedCode(code);
+                    // 読み取り成功後、少し待機
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            } catch (error) {
+                // エラーは無視して継続
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+    }
+    
+    async captureAndScan() {
+        if (!this.stream) return;
+        
+        try {
+            this.updateStatus('スキャン中...');
+            const code = await this.scanBarcode();
+            if (code) {
+                this.addScannedCode(code);
+            } else {
+                this.updateStatus('バーコードを検出できませんでした');
+                this.vibrate([100, 50, 100]);
+            }
+        } catch (error) {
+            console.error('スキャンエラー:', error);
+            this.updateStatus('スキャン中にエラーが発生しました');
+            this.vibrate([100, 50, 100, 50, 100]);
+        }
+    }
+    
+    async scanBarcode() {
+        // ビデオから画像をキャプチャ
+        this.canvas.width = this.video.videoWidth;
+        this.canvas.height = this.video.videoHeight;
+        this.ctx.drawImage(this.video, 0, 0);
+        
+        const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+        
+        // ZXingライブラリを使用してバーコードを読み取り
+        const codeReader = new ZXing.BrowserMultiFormatReader();
+        
+        try {
+            const result = await codeReader.decodeFromImage(imageData);
+            return result.text;
+        } catch (error) {
+            return null;
+        }
+    }
+    
+    addScannedCode(code) {
+        // 重複チェック
+        if (this.scannedCodes.includes(code)) {
+            this.updateStatus('このバーコードは既に読み取られています');
+            this.vibrate([100, 50, 100]); // 短い振動
+            return;
+        }
+        
+        this.scannedCodes.push(code);
+        this.updateDisplay();
+        this.downloadBtn.disabled = false;
+        
+        this.updateStatus(`読み取り成功: ${code}`);
+        
+        // 成功音と振動
+        this.playSuccessSound();
+        this.vibrate([200, 100, 200]);
+    }
+    
+    vibrate(pattern) {
+        if (this.vibrationEnabled) {
+            navigator.vibrate(pattern);
+        }
+    }
+    
+    addManualCode() {
+        const code = this.manualInput.value.trim();
+        if (!code) {
+            this.updateStatus('バーコードを入力してください');
+            this.vibrate([100]);
+            return;
+        }
+        
+        this.addScannedCode(code);
+        this.manualInput.value = '';
+        this.manualInput.focus();
+    }
+    
+    updateDisplay() {
+        this.scannedCodesDiv.innerHTML = '';
+        
+        this.scannedCodes.forEach((code, index) => {
+            const codeItem = document.createElement('div');
+            codeItem.className = 'code-item';
+            codeItem.innerHTML = `
+                <span class="code-text">${code}</span>
+                <button class="remove-btn" onclick="scanner.removeCode(${index})">削除</button>
+            `;
+            this.scannedCodesDiv.appendChild(codeItem);
+        });
+        
+        // カウント更新
+        if (this.codeCountSpan) {
+            this.codeCountSpan.textContent = this.scannedCodes.length;
+        }
+    }
+    
+    removeCode(index) {
+        this.scannedCodes.splice(index, 1);
+        this.updateDisplay();
+        
+        if (this.scannedCodes.length === 0) {
+            this.downloadBtn.disabled = true;
+            this.updateStatus('カメラを開始してください');
+        } else {
+            this.updateStatus(`${this.scannedCodes.length}件のバーコードを読み取り済み`);
+        }
+    }
+    
+    downloadCSV() {
+        if (this.scannedCodes.length === 0) {
+            this.updateStatus('ダウンロードするバーコードがありません');
+            return;
+        }
+        
+        try {
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const filename = `barcode_data_${timestamp}.csv`;
+            
+            // CSVヘッダー
+            const csvContent = 'バーコード,読み取り日時\n';
+            
+            // データ行
+            const dataRows = this.scannedCodes.map(code => {
+                const now = new Date().toLocaleString('ja-JP');
+                return `${code},${now}`;
+            }).join('\n');
+            
+            const fullCsv = csvContent + dataRows;
+            
+            // ダウンロード
+            const blob = new Blob([fullCsv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            
+            if (link.download !== undefined) {
+                const url = URL.createObjectURL(blob);
+                link.setAttribute('href', url);
+                link.setAttribute('download', filename);
+                link.style.visibility = 'hidden';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                this.updateStatus(`${this.scannedCodes.length}件のデータをダウンロードしました`);
+                this.vibrate([100, 50, 100, 50, 100]);
+            } else {
+                // ダウンロードがサポートされていない場合
+                this.updateStatus('ダウンロードがサポートされていません');
+            }
+        } catch (error) {
+            console.error('CSVダウンロードエラー:', error);
+            this.updateStatus('ダウンロードに失敗しました');
+        }
+    }
+    
+    playSuccessSound() {
+        // 簡単な成功音（オプション）
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+        oscillator.frequency.setValueAtTime(600, audioContext.currentTime + 0.1);
+        
+        gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.2);
+    }
+}
+
+// アプリケーション開始
+let scanner;
+document.addEventListener('DOMContentLoaded', () => {
+    scanner = new BarcodeScanner();
+}); 
